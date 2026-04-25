@@ -1,45 +1,45 @@
 # Playto Payout System
 
-A Django-based payout system with idempotency, concurrency control, and Celery-based background processing.
+This is a payout system I built for the Playto challenge. It handles merchant balances, payout requests, and tracks payout status through different states. The key things it gets right are concurrency (two people can't spend the same money), idempotency (retrying a request doesn't create duplicate payouts), and data integrity (the ledger always balances).
 
-## Features
+## What it does
 
-- **Append-only ledger**: All transactions are immutable credits/debits
-- **Concurrency-safe**: Uses PostgreSQL row-level locking (SELECT FOR UPDATE)
-- **Idempotency**: UUID-based idempotency keys with 24-hour expiration
-- **State machine**: Enforced payout status transitions (pending → processing → completed/failed)
-- **Background processing**: Celery workers simulate bank transfers with retry logic
-- **React dashboard**: Real-time balance tracking and payout requests
+- **Ledger**: Every transaction is recorded as a credit or debit - no updating balance columns
+- **Concurrency**: Uses PostgreSQL row-level locking so simultaneous requests don't mess up the balance
+- **Idempotency**: You can retry requests with the same key without creating duplicates
+- **State machine**: Payouts follow a strict path: pending → processing → completed/failed
+- **Background jobs**: Celery workers process payouts asynchronously with retry logic
+- **Dashboard**: React frontend shows balances and lets you request payouts
 
-## Architecture
+## How it's structured
 
 ### Backend (Django)
-- `backend/payout/models.py`: Merchant, Transaction, Payout models
-- `backend/payout/views.py`: REST API endpoints
-- `backend/payout/tasks.py`: Celery tasks for payout processing
-- `backend/config/celery.py`: Celery configuration with beat schedule
+- `backend/payout/models.py`: The data models for merchants, transactions, and payouts
+- `backend/payout/views.py`: The API endpoints that the frontend calls
+- `backend/payout/tasks.py`: Background jobs that process payouts
+- `backend/config/celery.py`: Celery setup and the beat scheduler for retries
 
 ### Frontend (React)
-- `frontend/src/App.jsx`: Dashboard with merchant selector, balance cards, and payout forms
-- Live polling every 3 seconds for payout status updates
+- `frontend/src/App.jsx`: The main dashboard where you see balances and request payouts
+- It polls the backend every 3 seconds to update payout status in real-time
 
-## Quick Start
+## Running it locally
 
-### Using Docker Compose
+### Easiest way - Docker Compose
 
 ```bash
 docker-compose up --build
 ```
 
-This will start:
-- PostgreSQL database (port 5432)
-- Redis (port 6379)
-- Django backend (port 8000)
-- Celery worker
-- Celery beat scheduler
-- React frontend (port 3000)
+This spins up everything you need:
+- PostgreSQL database
+- Redis for the task queue
+- Django backend API
+- Celery worker (processes payouts)
+- Celery beat scheduler (retries stuck payouts)
+- React frontend
 
-### Manual Setup
+### Manual setup (if you prefer)
 
 #### Backend
 
@@ -49,11 +49,11 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 python manage.py migrate
-python seed.py  # Create sample merchants and credits
+python seed.py  # This creates some sample merchants with credits
 python manage.py runserver
 ```
 
-#### Celery (separate terminals)
+#### Celery (you'll need two terminals for this)
 
 ```bash
 # Terminal 1: Worker
@@ -73,64 +73,56 @@ npm install
 npm run dev
 ```
 
-## API Endpoints
+## API endpoints
 
-- `POST /api/v1/payouts/` - Create payout (requires `Idempotency-Key` header)
+- `POST /api/v1/payouts/` - Create a payout (needs an `Idempotency-Key` header)
 - `GET /api/v1/merchants/` - List all merchants
-- `GET /api/v1/merchants/<id>/balance/` - Get merchant balance
+- `GET /api/v1/merchants/<id>/balance/` - Get a merchant's balance
 - `GET /api/v1/merchants/<id>/transactions/` - List transactions (paginated)
 - `GET /api/v1/merchants/<id>/payouts/` - List payouts (paginated)
 
-## Running Tests
+## Tests
 
 ```bash
 cd backend
 python manage.py test payout.tests
 ```
 
-Tests include:
-- Concurrency test: Verifies only one of two simultaneous payouts succeeds on insufficient balance
-- Idempotency test: Verifies duplicate requests with same key return cached response
+I wrote two tests that cover the important stuff:
+- **Concurrency test**: Two requests try to spend the same money at the same time - only one should succeed
+- **Idempotency test**: Sending the same request twice with the same key should return the same response, not create duplicates
 
-## Bank Transfer Simulation
+## How the bank simulation works
 
-The `simulate_bank_transfer()` function in `tasks.py` simulates bank API responses:
-- 70% success
-- 20% failure (funds refunded)
-- 10% hang (retried by beat scheduler)
+The `simulate_bank_transfer()` function in `tasks.py` pretends to call a bank API:
+- 70% of the time it succeeds
+- 20% of the time it fails (and the money gets refunded)
+- 10% of the time it hangs (the payout stays in "processing" and gets retried)
 
-Stuck payouts (>30 seconds in 'processing') are automatically retried with exponential backoff, up to 3 attempts.
+If a payout is stuck in "processing" for more than 30 seconds, the beat scheduler picks it up and retries it. It tries up to 3 times with exponential backoff before giving up and marking it as failed.
 
 ## Deployment
 
-### Live Deployment
+### Live version
 - **Backend API**: https://playto-backend-u2uu.onrender.com
 - **Frontend Dashboard**: https://playto-frontend.vercel.app
 
-### Production Architecture
+### What's deployed in production
 
-The complete production deployment consists of the following services:
+The live setup has all the pieces running:
 
-1. **Web Service (Django)**: Handles HTTP API requests
-2. **Background Worker (Celery)**: Processes payout tasks asynchronously
-3. **Beat Scheduler (Celery)**: Runs periodic tasks for retrying stuck payouts
-4. **PostgreSQL Database**: Stores merchants, transactions, and payouts
-5. **Redis**: Message broker for Celery task queue
+1. **Django web service** (on Render) - Handles the API requests
+2. **Celery worker** (on Railway) - Processes payout tasks in the background
+3. **Celery beat scheduler** (on Render) - Runs the retry logic for stuck payouts
+4. **PostgreSQL database** (on Render) - Stores all the data
+5. **Redis** (Upstash) - Message broker for the task queue
 
-### Current Deployment Status
+All of this is on free tiers to keep costs down.
 
-The live deployment includes:
-- ✅ Django backend API (fully functional)
-- ✅ React frontend dashboard (fully functional)
-- ✅ PostgreSQL database with seeded data
-- ✅ CORS configuration for cross-origin requests
+### Environment variables you'll need
 
-The Celery worker and beat services are implemented in the codebase and can be deployed as background workers with a Redis message broker. The `docker-compose.yml` file demonstrates the complete multi-service setup for local development and production deployment.
-
-### Environment Variables
-
-Required environment variables for production:
-- `SECRET_KEY`: Django secret key
-- `DATABASE_URL`: PostgreSQL connection string
-- `CELERY_BROKER_URL`: Redis connection string (for Celery)
-- `CELERY_RESULT_BACKEND`: Redis connection string (for Celery results)
+For production, you need to set these:
+- `SECRET_KEY` - Django's secret key
+- `DATABASE_URL` - PostgreSQL connection string
+- `CELERY_BROKER_URL` - Redis connection for Celery
+- `CELERY_RESULT_BACKEND` - Redis connection for Celery results

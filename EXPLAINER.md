@@ -7,19 +7,19 @@ credit_sum = self.transactions.aggregate(
 )['total'] or 0
 
 debit_sum = self.transactions.aggregate(
-    total=Sum('amount_paise', filter=Q(
-        transaction_type='debit',
-        payout__status__in=['pending', 'processing', 'completed']
-    ))
+    total=Sum('amount_paise', filter=Q(transaction_type='debit'))
 )['total'] or 0
 
 return credit_sum - debit_sum
 ```
 
-Credits and debits are modelled as separate Transaction rows (not +/- on a balance column) because:
-- Append-only ledger is auditable and irreversible
-- Balance is always computable from source-of-truth rows
-- No UPDATE to a balance column means no update conflicts
+I modeled credits and debits as separate Transaction rows instead of having a balance column that gets updated. Here's why:
+
+- Every transaction is a permanent record - you can always audit the full history
+- The balance is just calculated from the transactions, so it's always accurate
+- No updating a balance column means no race conditions when multiple requests try to change it at once
+
+I subtract ALL debits (not filtering by payout status) because when a payout fails, the debit transaction stays in the ledger (the money was actually held temporarily) and a refund credit is added. If I only subtracted "successful" debits, the money would be counted twice - once from the original credit and once from the refund.
 
 ## The Lock
 ```python
@@ -35,10 +35,7 @@ with transaction.atomic():
     )['total'] or 0
 
     debit_sum = merchant.transactions.aggregate(
-        total=Sum('amount_paise', filter=Q(
-            transaction_type='debit',
-            payout__status__in=['pending', 'processing', 'completed']
-        ))
+        total=Sum('amount_paise', filter=Q(transaction_type='debit'))
     )['total'] or 0
 
     available = credit_sum - debit_sum
@@ -51,15 +48,14 @@ with transaction.atomic():
         }, status=422)
 ```
 
-Relies on PostgreSQL row-level locking via SELECT FOR UPDATE.
-When two concurrent requests hit the same merchant row, one blocks at the lock boundary.
-The blocked request re-reads balance after acquiring the lock — by then funds are already held.
+This uses PostgreSQL's row-level locking with `SELECT FOR UPDATE`. Here's what happens when two requests come in at the same time trying to spend the same money:
+
+The first request grabs the lock on the merchant row. The second request has to wait at that line. Once the first request finishes (either succeeds or fails), it releases the lock. The second request then gets the lock, re-reads the balance, and sees that the money is already gone (if the first succeeded). This prevents the classic "two people spend the same $100" problem.
 
 ## The Idempotency
-The unique_together constraint on (merchant, idempotency_key) serves as the idempotency store.
-In-flight case: if request A is mid-transaction when request B arrives with the same key,
-B will either find the committed Payout (replay response) or hit the unique constraint (500 → retry logic).
-The idempotency check happens before the lock, using a 24-hour expiration window.
+The system uses a database constraint `unique_together` on (merchant, idempotency_key) to detect duplicate requests. When a request comes in with an idempotency key, I first check if a payout with that key already exists (within 24 hours). If it does, I return the exact same response as the first time.
+
+The tricky case is when the first request is still in progress when the second one arrives. In that case, the second request might either find the already-committed payout (if the first finished just in time) or hit the unique constraint error (if they're truly simultaneous). I handle the constraint error as a 500 that the client can retry.
 
 ## The State Machine
 ```python
@@ -81,35 +77,28 @@ def transition_to(self, new_status):
     self.status = new_status
 ```
 
-failed → completed is blocked because 'failed' maps to [] in ALLOWED_TRANSITIONS.
-The check lives in Payout.transition_to(), called before every status save.
+I enforce strict state transitions. A payout can only go from pending → processing → completed/failed. You can't go backwards or jump around. The check is in the `transition_to()` method which gets called before every status change. For example, trying to go from 'failed' to 'completed' will raise a ValueError because 'failed' has an empty list of allowed transitions.
 
 ## The AI Audit
-One honest example where the initial implementation was wrong:
-The initial balance calculation attempted to subtract Sum() expressions inside a single aggregate() call:
-```python
-result = self.transactions.aggregate(
-    total=Sum('amount_paise', filter=Q(transaction_type='credit'))
-    - Sum('amount_paise', filter=Q(transaction_type='debit', payout__status='completed'))
-    - Sum('amount_paise', filter=Q(transaction_type='debit', payout__status='processing'))
-    - Sum('amount_paise', filter=Q(transaction_type='debit', payout__status='pending'))
-)
-```
-This doesn't work correctly in SQLite (and has portability issues). The subtraction of Sum() expressions inside aggregate() is not valid SQL and returns incorrect results (zeros).
+Here's a real bug I caught that came from trusting the initial code too much:
 
-Fixed by doing separate aggregations and subtracting in Python:
+The original balance calculation only subtracted debits that had "successful" payout statuses:
 ```python
-credit_sum = self.transactions.aggregate(
-    total=Sum('amount_paise', filter=Q(transaction_type='credit'))
-)['total'] or 0
-
 debit_sum = self.transactions.aggregate(
     total=Sum('amount_paise', filter=Q(
         transaction_type='debit',
         payout__status__in=['pending', 'processing', 'completed']
     ))
 )['total'] or 0
-
-return credit_sum - debit_sum
 ```
-While this uses Python for the final subtraction, it's safe because each aggregation is atomic at the DB level, and the subtraction happens on already-aggregated values that won't change between the two calls when used inside a transaction with proper locking.
+
+This caused a double-money bug. When a payout failed, the debit transaction stayed in the ledger (because the money WAS held temporarily) and a refund credit was added. But since failed debits weren't being subtracted from the balance, the money got counted twice - once from the original credit and once from the refund credit.
+
+I fixed it by subtracting ALL debits regardless of payout status:
+```python
+debit_sum = self.transactions.aggregate(
+    total=Sum('amount_paise', filter=Q(transaction_type='debit'))
+)['total'] or 0
+```
+
+Now the math works out: credits minus all debits equals the actual available balance. When a payout fails, the debit stays subtracted (the money was held) and the refund credit adds it back to the available balance.

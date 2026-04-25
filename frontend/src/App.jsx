@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import { Wallet, ArrowUpRight, RefreshCw, CheckCircle, XCircle, Clock } from 'lucide-react'
 
-// Use relative path to leverage Vite proxy
-const API_URL = ''
+// Use environment variable or fallback to deployed backend
+const API_URL = import.meta.env.VITE_API_URL || 'https://playto-backend-u2uu.onrender.com'
 
 function formatPaise(paise) {
   return `₹${(paise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -38,8 +38,12 @@ function App() {
       fetchBalance()
       fetchTransactions()
       fetchPayouts()
-      // Set up polling for payouts
-      const interval = setInterval(fetchPayouts, 3000)
+      // Set up polling for payouts, balance, and transactions
+      const interval = setInterval(() => {
+        fetchBalance()
+        fetchTransactions()
+        fetchPayouts()
+      }, 3000)
       return () => clearInterval(interval)
     }
   }, [selectedMerchant])
