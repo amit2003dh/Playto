@@ -1,0 +1,27 @@
+[build]
+builder = "NIXPACKS"
+
+[build.env]
+NIXPACKS_PYTHON_VERSION = "3.10"
+
+[[services]]
+name = "backend"
+command = "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT"
+[build.env]
+NIXPACKS_BUILD_CMD = "pip install -r requirements.txt && python manage.py collectstatic --noinput"
+[deploy]
+healthcheckPath = "/api/v1/"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+
+[[services]]
+name = "worker"
+command = "celery -A config worker -l info"
+[build.env]
+NIXPACKS_BUILD_CMD = "pip install -r requirements.txt"
+
+[[services]]
+name = "beat"
+command = "celery -A config beat -l info"
+[build.env]
+NIXPACKS_BUILD_CMD = "pip install -r requirements.txt"
