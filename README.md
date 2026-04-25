@@ -100,3 +100,37 @@ The `simulate_bank_transfer()` function in `tasks.py` simulates bank API respons
 - 10% hang (retried by beat scheduler)
 
 Stuck payouts (>30 seconds in 'processing') are automatically retried with exponential backoff, up to 3 attempts.
+
+## Deployment
+
+### Live Deployment
+- **Backend API**: https://playto-backend-u2uu.onrender.com
+- **Frontend Dashboard**: https://playto-frontend.vercel.app
+
+### Production Architecture
+
+The complete production deployment consists of the following services:
+
+1. **Web Service (Django)**: Handles HTTP API requests
+2. **Background Worker (Celery)**: Processes payout tasks asynchronously
+3. **Beat Scheduler (Celery)**: Runs periodic tasks for retrying stuck payouts
+4. **PostgreSQL Database**: Stores merchants, transactions, and payouts
+5. **Redis**: Message broker for Celery task queue
+
+### Current Deployment Status
+
+The live deployment includes:
+- ✅ Django backend API (fully functional)
+- ✅ React frontend dashboard (fully functional)
+- ✅ PostgreSQL database with seeded data
+- ✅ CORS configuration for cross-origin requests
+
+The Celery worker and beat services are implemented in the codebase and can be deployed as background workers with a Redis message broker. The `docker-compose.yml` file demonstrates the complete multi-service setup for local development and production deployment.
+
+### Environment Variables
+
+Required environment variables for production:
+- `SECRET_KEY`: Django secret key
+- `DATABASE_URL`: PostgreSQL connection string
+- `CELERY_BROKER_URL`: Redis connection string (for Celery)
+- `CELERY_RESULT_BACKEND`: Redis connection string (for Celery results)
