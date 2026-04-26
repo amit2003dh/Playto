@@ -50,7 +50,7 @@ with transaction.atomic():
 
 This uses PostgreSQL's row-level locking with `SELECT FOR UPDATE`. Here's what happens when two requests come in at the same time trying to spend the same money:
 
-The first request grabs the lock on the merchant row. The second request has to wait at that line. Once the first request finishes (either succeeds or fails), it releases the lock. The second request then gets the lock, re-reads the balance, and sees that the money is already gone (if the first succeeded). This prevents the classic "two people spend the same $100" problem.
+The first request grabs the lock on the merchant row. The second request has to wait at that line. Once the first request finishes (either succeeds or fails), it releases the lock. The second request then gets the lock, re-reads the balance, and sees that the money is already gone (if the first succeeded). This prevents the classic "two people spend the same 100" problem.
 
 ## The Idempotency
 The system uses a database constraint `unique_together` on (merchant, idempotency_key) to detect duplicate requests. When a request comes in with an idempotency key, I first check if a payout with that key already exists (within 24 hours). If it does, I return the exact same response as the first time.
